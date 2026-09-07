@@ -1,0 +1,43 @@
+name: Daily LeetCode Stats Sync
+
+on:
+  workflow_dispatch:
+    inputs:
+      department:
+        description: "Optional: filter by department"
+        required: false
+        default: ""
+      year:
+        description: "Optional: filter by year"
+        required: false
+        default: ""
+      section:
+        description: "Optional: filter by section"
+        required: false
+        default: ""
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Run sync
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          LEETCODE_API_BASE: ${{ secrets.LEETCODE_API_BASE }} # optional, defaults to the public instance
+          SYNC_TYPE: Manual
+          DEPARTMENT: ${{ github.event.inputs.department }}
+          YEAR: ${{ github.event.inputs.year }}
+          SECTION: ${{ github.event.inputs.section }}
+        run: npm run sync

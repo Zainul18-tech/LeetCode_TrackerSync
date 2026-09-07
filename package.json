@@ -1,0 +1,16 @@
+{
+  "name": "leetcode-sync",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "description": "Daily sync of student LeetCode stats into Supabase",
+  "scripts": {
+    "sync": "node sync-leetcode-stats.mjs"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
