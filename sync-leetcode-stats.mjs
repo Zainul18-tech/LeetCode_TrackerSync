@@ -3,7 +3,12 @@ import { createClient } from "@supabase/supabase-js";
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const API_BASE = (process.env.LEETCODE_API_BASE || "https://alfa-leetcode-api.onrender.com").replace(/\/$/, "");
+
+// Two API bases: first BATCH1_SIZE students use API_BASE_1, the rest use API_BASE_2.
+const API_BASE_1 = (process.env.LEETCODE_API_BASE || "https://alfa-leetcode-api.onrender.com").replace(/\/$/, "");
+const API_BASE_2 = (process.env.LEETCODE_API_BASE_2 || "https://alfa-leetcode-api.onrender.com").replace(/\/$/, "");
+const BATCH1_SIZE = Number(process.env.BATCH1_SIZE || 30);
+
 const REQUEST_DELAY_MS = Number(process.env.REQUEST_DELAY_MS || 500);
 const MAX_RETRIES = 3;
 
@@ -27,6 +32,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000;
 function istDateString(d = new Date()) {
   return new Date(d.getTime() + IST_OFFSET_MS).toISOString().slice(0, 10);
+}
+
+// Pick the API base for a given student index (0-based, in the order fetched).
+function apiBaseForIndex(index) {
+  return index < BATCH1_SIZE ? API_BASE_1 : API_BASE_2;
 }
 
 async function fetchJson(url) {
@@ -75,8 +85,8 @@ function computeStreakThroughYesterday(submissionCalendar) {
   return streak;
 }
 
-async function getSolvedCounts(username) {
-  const data = await fetchJson(`${API_BASE}/${encodeURIComponent(username)}/solved`);
+async function getSolvedCounts(username, apiBase) {
+  const data = await fetchJson(`${apiBase}/${encodeURIComponent(username)}/solved`);
   return {
     easy: Number(data.easySolved ?? data.easy ?? 0),
     medium: Number(data.mediumSolved ?? data.medium ?? 0),
@@ -84,8 +94,8 @@ async function getSolvedCounts(username) {
   };
 }
 
-async function getSubmissionCalendar(username) {
-  const data = await fetchJson(`${API_BASE}/${encodeURIComponent(username)}/calendar`);
+async function getSubmissionCalendar(username, apiBase) {
+  const data = await fetchJson(`${apiBase}/${encodeURIComponent(username)}/calendar`);
   let calendar = data.submissionCalendar ?? data;
   if (typeof calendar === "string") {
     try {
@@ -129,7 +139,9 @@ async function finishSyncLog(logId, status) {
 }
 
 async function main() {
-  console.log(`Starting LeetCode sync via ${API_BASE} (${SYNC_TYPE})`);
+  console.log(
+    `Starting LeetCode sync (${SYNC_TYPE}). First ${BATCH1_SIZE} students -> ${API_BASE_1}, remaining -> ${API_BASE_2}`
+  );
 
   let query = supabase.from("students").select("reg_no, leetcode_username");
   if (DEPARTMENT) query = query.eq("department", DEPARTMENT);
@@ -150,8 +162,11 @@ async function main() {
   let updated = 0;
   let streakUpdatedCount = 0;
 
-  for (const student of students) {
+  for (let i = 0; i < students.length; i++) {
+    const student = students[i];
     const { reg_no, leetcode_username } = student;
+    const apiBase = apiBaseForIndex(i);
+
     try {
       const { data: existing } = await supabase
         .from("student_summary")
@@ -163,8 +178,8 @@ async function main() {
         existing?.streak_updated_at && istDateString(new Date(existing.streak_updated_at)) === istDateString();
 
       const [solved, calendar] = await Promise.all([
-        getSolvedCounts(leetcode_username),
-        alreadyUpdatedToday ? Promise.resolve(null) : getSubmissionCalendar(leetcode_username),
+        getSolvedCounts(leetcode_username, apiBase),
+        alreadyUpdatedToday ? Promise.resolve(null) : getSubmissionCalendar(leetcode_username, apiBase),
       ]);
 
       const payload = {
@@ -193,10 +208,12 @@ async function main() {
       if (upsertErr) throw upsertErr;
 
       updated++;
-      console.log(`OK  ${reg_no} (${leetcode_username}) -> E:${solved.easy} M:${solved.medium} H:${solved.hard} ${streakNote}`);
+      console.log(
+        `OK  [${i + 1}/${students.length}] ${reg_no} (${leetcode_username}) via ${apiBase} -> E:${solved.easy} M:${solved.medium} H:${solved.hard} ${streakNote}`
+      );
     } catch (err) {
-      failures.push({ reg_no, leetcode_username, error: err.message });
-      console.error(`FAIL ${reg_no} (${leetcode_username}): ${err.message}`);
+      failures.push({ reg_no, leetcode_username, apiBase, error: err.message });
+      console.error(`FAIL [${i + 1}/${students.length}] ${reg_no} (${leetcode_username}) via ${apiBase}: ${err.message}`);
     }
 
     await sleep(REQUEST_DELAY_MS);
@@ -209,7 +226,7 @@ async function main() {
 
   if (failures.length) {
     console.log(`Failures (${failures.length}):`);
-    for (const f of failures) console.log(`  - ${f.reg_no} (${f.leetcode_username}): ${f.error}`);
+    for (const f of failures) console.log(`  - ${f.reg_no} (${f.leetcode_username}) via ${f.apiBase}: ${f.error}`);
     process.exitCode = 1;
   }
 }
