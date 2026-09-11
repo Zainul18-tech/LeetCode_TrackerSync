@@ -22,8 +22,13 @@ const SECTION = process.env.SECTION || null;
 
 // Register-number range filter (optional partial sync by reg_no range).
 // e.g. REG_FROM=21CS001 REG_TO=21CS060
-const REG_FROM = process.env.REG_FROM || null;
-const REG_TO = process.env.REG_TO || null;
+// If both are given and REG_FROM sorts after REG_TO, they're auto-swapped
+// so the range direction never causes an empty result.
+let REG_FROM = process.env.REG_FROM || null;
+let REG_TO = process.env.REG_TO || null;
+if (REG_FROM && REG_TO && REG_FROM > REG_TO) {
+  [REG_FROM, REG_TO] = [REG_TO, REG_FROM];
+}
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
   console.error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY env vars.");
