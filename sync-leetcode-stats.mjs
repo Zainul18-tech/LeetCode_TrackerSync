@@ -24,8 +24,10 @@ const SECTION = process.env.SECTION || null;
 // e.g. REG_FROM=21CS001 REG_TO=21CS060
 // If both are given and REG_FROM sorts after REG_TO, they're auto-swapped
 // so the range direction never causes an empty result.
-let REG_FROM = process.env.REG_FROM || null;
-let REG_TO = process.env.REG_TO || null;
+const RAW_REG_FROM = process.env.REG_FROM || null;
+const RAW_REG_TO = process.env.REG_TO || null;
+let REG_FROM = RAW_REG_FROM;
+let REG_TO = RAW_REG_TO;
 if (REG_FROM && REG_TO && REG_FROM > REG_TO) {
   [REG_FROM, REG_TO] = [REG_TO, REG_FROM];
 }
@@ -170,8 +172,9 @@ async function main() {
     `Starting LeetCode sync (${SYNC_TYPE}). Primary API -> ${API_BASE_PRIMARY}` +
       (API_BASE_FALLBACK !== API_BASE_PRIMARY ? `, fallback -> ${API_BASE_FALLBACK}` : " (no distinct fallback configured)")
   );
+  console.log(`Raw env received -> REG_FROM="${RAW_REG_FROM}" REG_TO="${RAW_REG_TO}"`);
   if (REG_FROM || REG_TO) {
-    console.log(`Reg-no range filter: ${REG_FROM ?? "(start)"} -> ${REG_TO ?? "(end)"}`);
+    console.log(`Reg-no range filter (after order-check): ${REG_FROM ?? "(start)"} -> ${REG_TO ?? "(end)"}`);
   }
 
   let query = supabase.from("students").select("reg_no, leetcode_username");
