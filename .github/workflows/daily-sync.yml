@@ -15,6 +15,14 @@ on:
         description: "Optional: filter by section"
         required: false
         default: ""
+      reg_from:
+        description: "Optional: sync only reg_no >= this value"
+        required: false
+        default: ""
+      reg_to:
+        description: "Optional: sync only reg_no <= this value"
+        required: false
+        default: ""
 
 jobs:
   sync:
@@ -36,10 +44,13 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           LEETCODE_API_BASE: ${{ secrets.LEETCODE_API_BASE }}
-          LEETCODE_API_BASE_2: ${{ secrets.LEETCODE_API_BASE_2 }}
+          LEETCODE_API_BASE_FALLBACK: ${{ secrets.LEETCODE_API_BASE_FALLBACK }}
           REQUEST_DELAY_MS: ${{ secrets.REQUEST_DELAY_MS }}
           SYNC_TYPE: Manual
           DEPARTMENT: ${{ github.event.inputs.department }}
           YEAR: ${{ github.event.inputs.year }}
           SECTION: ${{ github.event.inputs.section }}
+          REG_FROM: ${{ github.event.inputs.reg_from }}
+          REG_TO: ${{ github.event.inputs.reg_to }}
+
         run: npm run sync
