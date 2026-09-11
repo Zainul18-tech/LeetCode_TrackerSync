@@ -28,6 +28,21 @@ const RAW_REG_FROM = process.env.REG_FROM || null;
 const RAW_REG_TO = process.env.REG_TO || null;
 let REG_FROM = RAW_REG_FROM;
 let REG_TO = RAW_REG_TO;
+if (REG_FROM && REG_TO) {
+  let commonPrefixLen = 0;
+  const maxLen = Math.min(REG_FROM.length, REG_TO.length);
+  while (commonPrefixLen < maxLen && REG_FROM[commonPrefixLen] === REG_TO[commonPrefixLen]) {
+    commonPrefixLen++;
+  }
+  const suffixLen = maxLen - commonPrefixLen;
+  if (suffixLen > 5) {
+    console.warn(
+      `WARNING: REG_FROM="${REG_FROM}" and REG_TO="${REG_TO}" only share a ${commonPrefixLen}-character common prefix. ` +
+        `This range will match a much wider set of reg_no values than a typical "same series, different last digits" range. ` +
+        `Double-check these values before relying on the result.`
+    );
+  }
+}
 if (REG_FROM && REG_TO && REG_FROM > REG_TO) {
   [REG_FROM, REG_TO] = [REG_TO, REG_FROM];
 }
@@ -145,6 +160,8 @@ async function startSyncLog(totalStudents) {
       department: DEPARTMENT,
       year: YEAR,
       section: SECTION,
+      reg_from: REG_FROM,
+      reg_to: REG_TO,
       total_students: totalStudents,
       started_at: new Date().toISOString(),
     })
