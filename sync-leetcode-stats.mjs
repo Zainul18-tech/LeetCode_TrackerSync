@@ -138,8 +138,6 @@ async function startSyncLog(totalStudents) {
       department: DEPARTMENT,
       year: YEAR,
       section: SECTION,
-      reg_from: REG_FROM,
-      reg_to: REG_TO,
       total_students: totalStudents,
       started_at: new Date().toISOString(),
     })
