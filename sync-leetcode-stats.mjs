@@ -24,6 +24,11 @@ const SECTION = process.env.SECTION || null;
 // e.g. REG_FROM=21CS001 REG_TO=21CS060
 // If both are given and REG_FROM sorts after REG_TO, they're auto-swapped
 // so the range direction never causes an empty result.
+//
+// REG_FROM/REG_TO are kept as TEXT for querying the `students` table (its
+// reg_no column is text and range-filtered with gte/lte on the raw string).
+// sync_logs.reg_from/reg_to are INTEGER, so a separate, explicitly-converted
+// pair (REG_FROM_INT/REG_TO_INT) is computed below just for that insert.
 const RAW_REG_FROM = process.env.REG_FROM || null;
 const RAW_REG_TO = process.env.REG_TO || null;
 let REG_FROM = RAW_REG_FROM;
@@ -46,6 +51,35 @@ if (REG_FROM && REG_TO) {
 if (REG_FROM && REG_TO && REG_FROM > REG_TO) {
   [REG_FROM, REG_TO] = [REG_TO, REG_FROM];
 }
+
+// Converts a reg_no string into an integer for the sync_logs.reg_from/reg_to
+// columns, by stripping any non-digit characters (e.g. department letters)
+// and parsing what remains. Returns null for null/empty/non-numeric input.
+//
+// CAUTION: this is lossy. "21CS001" and "21CE001" both strip down to the
+// same digits ("21001"), so two different register-number series can
+// collide onto the same integer. A warning is logged whenever the input
+// contains non-digit characters, since that's the case where information
+// is being discarded.
+function regNoToInt(regNo) {
+  if (!regNo) return null;
+  const digitsOnly = regNo.replace(/\D/g, "");
+  if (!digitsOnly) {
+    console.warn(`Could not convert reg_no "${regNo}" to an integer (no digits found) — storing null.`);
+    return null;
+  }
+  if (digitsOnly.length !== regNo.length) {
+    console.warn(
+      `reg_no "${regNo}" contains non-digit characters that will be dropped for sync_logs storage -> ${digitsOnly}. ` +
+        `Different reg_no series (e.g. different department codes) can collide onto the same integer this way.`
+    );
+  }
+  const n = Number(digitsOnly);
+  return Number.isFinite(n) ? n : null;
+}
+
+const REG_FROM_INT = regNoToInt(REG_FROM);
+const REG_TO_INT = regNoToInt(REG_TO);
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
   console.error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY env vars.");
@@ -151,6 +185,9 @@ async function getSubmissionCalendar(username) {
   return { calendar, apiBaseUsed };
 }
 
+// Creates the sync_logs row up front (status still null/in-progress).
+// reg_from/reg_to are inserted as the pre-converted integers
+// (REG_FROM_INT/REG_TO_INT), matching the INTEGER column type.
 async function startSyncLog(totalStudents) {
   const { data, error } = await supabase
     .from("sync_logs")
@@ -160,8 +197,8 @@ async function startSyncLog(totalStudents) {
       department: DEPARTMENT,
       year: YEAR,
       section: SECTION,
-      reg_from: REG_FROM,
-      reg_to: REG_TO,
+      reg_from: REG_FROM_INT,
+      reg_to: REG_TO_INT,
       total_students: totalStudents,
       started_at: new Date().toISOString(),
     })
@@ -169,19 +206,29 @@ async function startSyncLog(totalStudents) {
     .single();
 
   if (error) {
-    console.error("Failed to create sync_logs row:", error.message);
+    console.error("Failed to create sync_logs row:", JSON.stringify(error, null, 2));
     return null; // don't block the sync just because logging failed
   }
   return data.id;
 }
 
+// Finalizes the sync_logs row. Always called from a finally block in main()
+// so a completed/failed status gets written even if the run throws partway
+// through, as long as the row was created in the first place.
 async function finishSyncLog(logId, status) {
-  if (!logId) return;
+  if (!logId) {
+    console.warn("No sync_logs row to finalize (it was never created) — skipping update.");
+    return;
+  }
   const { error } = await supabase
     .from("sync_logs")
     .update({ completed_at: new Date().toISOString(), status })
     .eq("id", logId);
-  if (error) console.error("Failed to finalize sync_logs row:", error.message);
+  if (error) {
+    console.error("Failed to finalize sync_logs row:", JSON.stringify(error, null, 2));
+  } else {
+    console.log(`sync_logs row ${logId} updated -> status=${status}`);
+  }
 }
 
 async function main() {
@@ -191,7 +238,8 @@ async function main() {
   );
   console.log(`Raw env received -> REG_FROM="${RAW_REG_FROM}" REG_TO="${RAW_REG_TO}"`);
   if (REG_FROM || REG_TO) {
-    console.log(`Reg-no range filter (after order-check): ${REG_FROM ?? "(start)"} -> ${REG_TO ?? "(end)"}`);
+    console.log(`Reg-no range filter (after order-check, used for students query): ${REG_FROM ?? "(start)"} -> ${REG_TO ?? "(end)"}`);
+    console.log(`Reg-no range as stored in sync_logs (integer): ${REG_FROM_INT ?? "(null)"} -> ${REG_TO_INT ?? "(null)"}`);
   }
 
   let query = supabase.from("students").select("reg_no, leetcode_username");
@@ -215,77 +263,83 @@ async function main() {
   const failures = [];
   let updated = 0;
   let streakUpdatedCount = 0;
+  let finalStatus = "Failed";
 
-  for (let i = 0; i < students.length; i++) {
-    const student = students[i];
-    const { reg_no, leetcode_username } = student;
+  try {
+    for (let i = 0; i < students.length; i++) {
+      const student = students[i];
+      const { reg_no, leetcode_username } = student;
 
-    try {
-      const { data: existing } = await supabase
-        .from("student_summary")
-        .select("current_streak, streak_updated_at")
-        .eq("reg_no", reg_no)
-        .maybeSingle();
+      try {
+        const { data: existing } = await supabase
+          .from("student_summary")
+          .select("current_streak, streak_updated_at")
+          .eq("reg_no", reg_no)
+          .maybeSingle();
 
-      const alreadyUpdatedToday =
-        existing?.streak_updated_at && istDateString(new Date(existing.streak_updated_at)) === istDateString();
+        const alreadyUpdatedToday =
+          existing?.streak_updated_at && istDateString(new Date(existing.streak_updated_at)) === istDateString();
 
-      const [solvedResult, calendarResult] = await Promise.all([
-        getSolvedCounts(leetcode_username),
-        alreadyUpdatedToday
-          ? Promise.resolve({ calendar: null, apiBaseUsed: null })
-          : getSubmissionCalendar(leetcode_username),
-      ]);
+        const [solvedResult, calendarResult] = await Promise.all([
+          getSolvedCounts(leetcode_username),
+          alreadyUpdatedToday
+            ? Promise.resolve({ calendar: null, apiBaseUsed: null })
+            : getSubmissionCalendar(leetcode_username),
+        ]);
 
-      const solved = solvedResult.counts;
-      const apiBaseUsed = solvedResult.apiBaseUsed;
+        const solved = solvedResult.counts;
+        const apiBaseUsed = solvedResult.apiBaseUsed;
 
-      const payload = {
-        reg_no,
-        easy_count: solved.easy,
-        medium_count: solved.medium,
-        hard_count: solved.hard,
-        updated_at: new Date().toISOString(),
-      };
+        const payload = {
+          reg_no,
+          easy_count: solved.easy,
+          medium_count: solved.medium,
+          hard_count: solved.hard,
+          updated_at: new Date().toISOString(),
+        };
 
-      let streakNote = "unchanged (already updated today)";
-      if (!alreadyUpdatedToday) {
-        const newStreak = computeStreakThroughYesterday(calendarResult.calendar);
-        const previousStreak = existing?.current_streak ?? 0;
-        payload.current_streak = newStreak;
-        payload.yesterday_streak = previousStreak;
-        payload.streak_updated_at = new Date().toISOString();
-        streakNote = `streak:${newStreak}`;
-        streakUpdatedCount++;
+        let streakNote = "unchanged (already updated today)";
+        if (!alreadyUpdatedToday) {
+          const newStreak = computeStreakThroughYesterday(calendarResult.calendar);
+          const previousStreak = existing?.current_streak ?? 0;
+          payload.current_streak = newStreak;
+          payload.yesterday_streak = previousStreak;
+          payload.streak_updated_at = new Date().toISOString();
+          streakNote = `streak:${newStreak}`;
+          streakUpdatedCount++;
+        }
+
+        const { error: upsertErr } = await supabase
+          .from("student_summary")
+          .upsert(payload, { onConflict: "reg_no" });
+
+        if (upsertErr) throw upsertErr;
+
+        updated++;
+        console.log(
+          `OK  [${i + 1}/${students.length}] ${reg_no} (${leetcode_username}) via ${apiBaseUsed} -> E:${solved.easy} M:${solved.medium} H:${solved.hard} ${streakNote}`
+        );
+      } catch (err) {
+        failures.push({ reg_no, leetcode_username, error: err.message });
+        console.error(`FAIL [${i + 1}/${students.length}] ${reg_no} (${leetcode_username}): ${err.message}`);
       }
 
-      const { error: upsertErr } = await supabase
-        .from("student_summary")
-        .upsert(payload, { onConflict: "reg_no" });
-
-      if (upsertErr) throw upsertErr;
-
-      updated++;
-      console.log(
-        `OK  [${i + 1}/${students.length}] ${reg_no} (${leetcode_username}) via ${apiBaseUsed} -> E:${solved.easy} M:${solved.medium} H:${solved.hard} ${streakNote}`
-      );
-    } catch (err) {
-      failures.push({ reg_no, leetcode_username, error: err.message });
-      console.error(`FAIL [${i + 1}/${students.length}] ${reg_no} (${leetcode_username}): ${err.message}`);
+      await sleep(REQUEST_DELAY_MS);
     }
 
-    await sleep(REQUEST_DELAY_MS);
-  }
+    console.log(`\nDone. Updated ${updated}/${students.length}. Streak recomputed for ${streakUpdatedCount}.`);
 
-  console.log(`\nDone. Updated ${updated}/${students.length}. Streak recomputed for ${streakUpdatedCount}.`);
+    finalStatus = failures.length ? "Failed" : "Success";
 
-  const finalStatus = failures.length ? "Failed" : "Success";
-  await finishSyncLog(logId, finalStatus);
-
-  if (failures.length) {
-    console.log(`Failures (${failures.length}):`);
-    for (const f of failures) console.log(`  - ${f.reg_no} (${f.leetcode_username}): ${f.error}`);
-    process.exitCode = 1;
+    if (failures.length) {
+      console.log(`Failures (${failures.length}):`);
+      for (const f of failures) console.log(`  - ${f.reg_no} (${f.leetcode_username}): ${f.error}`);
+      process.exitCode = 1;
+    }
+  } finally {
+    // Runs whether the loop completed cleanly, threw, or exited early —
+    // guarantees the sync_logs row is finalized (when it was created).
+    await finishSyncLog(logId, finalStatus);
   }
 }
 
