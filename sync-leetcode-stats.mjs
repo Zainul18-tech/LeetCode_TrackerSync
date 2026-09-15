@@ -185,10 +185,14 @@ async function getSubmissionCalendar(username) {
   return { calendar, apiBaseUsed };
 }
 
-// Creates the sync_logs row up front (status still null/in-progress).
-// reg_from/reg_to are inserted as the pre-converted integers
-// (REG_FROM_INT/REG_TO_INT), matching the INTEGER column type.
-async function startSyncLog(totalStudents) {
+// Inserts ONE brand-new sync_logs row per run, once the run has finished.
+// Unlike the previous "insert a placeholder row at start, then update it"
+// approach, this only ever does a single INSERT — called from the finally
+// block in main() with the start time captured up front and everything
+// else (status, completed_at) known by the time the run is done. That means
+// every run — success or failure — always produces exactly one new row,
+// and there's never a half-written "in progress" row left behind.
+async function logSyncRun({ startedAt, totalStudents, status }) {
   const { data, error } = await supabase
     .from("sync_logs")
     .insert({
@@ -200,38 +204,24 @@ async function startSyncLog(totalStudents) {
       reg_from: REG_FROM_INT,
       reg_to: REG_TO_INT,
       total_students: totalStudents,
-      started_at: new Date().toISOString(),
+      started_at: startedAt,
+      completed_at: new Date().toISOString(),
+      status,
     })
     .select("id")
     .single();
 
   if (error) {
-    console.error("Failed to create sync_logs row:", JSON.stringify(error, null, 2));
-    return null; // don't block the sync just because logging failed
+    console.error("Failed to insert sync_logs row:", JSON.stringify(error, null, 2));
+    return null;
   }
+  console.log(`sync_logs row ${data.id} created -> status=${status}`);
   return data.id;
 }
 
-// Finalizes the sync_logs row. Always called from a finally block in main()
-// so a completed/failed status gets written even if the run throws partway
-// through, as long as the row was created in the first place.
-async function finishSyncLog(logId, status) {
-  if (!logId) {
-    console.warn("No sync_logs row to finalize (it was never created) — skipping update.");
-    return;
-  }
-  const { error } = await supabase
-    .from("sync_logs")
-    .update({ completed_at: new Date().toISOString(), status })
-    .eq("id", logId);
-  if (error) {
-    console.error("Failed to finalize sync_logs row:", JSON.stringify(error, null, 2));
-  } else {
-    console.log(`sync_logs row ${logId} updated -> status=${status}`);
-  }
-}
-
 async function main() {
+  const startedAt = new Date().toISOString();
+
   console.log(
     `Starting LeetCode sync (${SYNC_TYPE}). Primary API -> ${API_BASE_PRIMARY}` +
       (API_BASE_FALLBACK !== API_BASE_PRIMARY ? `, fallback -> ${API_BASE_FALLBACK}` : " (no distinct fallback configured)")
@@ -254,11 +244,13 @@ async function main() {
 
   if (studentsErr) {
     console.error("Failed to fetch students:", studentsErr.message);
+    // Still record that a run was attempted, even though it never got
+    // past fetching the student list.
+    await logSyncRun({ startedAt, totalStudents: 0, status: "Failed" });
     process.exit(1);
   }
 
   console.log(`Found ${students.length} students.`);
-  const logId = await startSyncLog(students.length);
 
   const failures = [];
   let updated = 0;
@@ -337,9 +329,9 @@ async function main() {
       process.exitCode = 1;
     }
   } finally {
-    // Runs whether the loop completed cleanly, threw, or exited early —
-    // guarantees the sync_logs row is finalized (when it was created).
-    await finishSyncLog(logId, finalStatus);
+    // Always inserts exactly one new sync_logs row for this run, whether
+    // the loop completed cleanly, threw, or exited early.
+    await logSyncRun({ startedAt, totalStudents: students.length, status: finalStatus });
   }
 }
 
